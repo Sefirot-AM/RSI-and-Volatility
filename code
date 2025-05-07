@@ -1,0 +1,208 @@
+# This script implements a trading strategy based on the RSI (Relative Strength Index) indicator,
+# managing buy and sell operations, with risk management through stop loss and take profit.
+# It also includes the analysis of cumulative returns of the market and the strategy for comparison.
+# Additionally, it calculates and displays the number of trades, win rate, risk/reward ratio,
+# and compares the returns between the RSI strategy and the Buy and Hold strategy.
+
+# The strategy buys when RSI is below 30 (indicating an oversold market),
+# and sells when RSI is above 70 (indicating an overbought market), or if the price falls below the stop loss
+# or exceeds the take profit. A trailing stop is used to protect gains if the price increases.
+
+# The section of code below calculates the RSI, cumulative market and strategy returns,
+# displays the gains and losses of each trade, and tracks capital over time.
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from datetime import datetime
+
+# Function to calculate RSI
+def calculate_rsi(data, window=14):
+    delta = data['close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+# Load data from CSV file
+file_path = r"C:\Users\matti\OneDrive\Desktop\trading\data\intraday\data_15_min\KO_data_15min.csv"
+df = pd.read_csv(file_path)
+
+# Ensure the 'timestamp' column is in datetime format
+df['timestamp'] = pd.to_datetime(df['timestamp'])
+
+# Sort the data by timestamp
+df = df.sort_values(by='timestamp')
+
+# Calculate RSI
+df['RSI'] = calculate_rsi(df)
+
+# Define variables
+buy_price = None
+buy_time = None
+n = 2
+m = 5
+
+# Calculate volatility
+df_change = df['close'].pct_change()
+std = df_change.std()
+
+# Variables to track positions, stop loss and take profit
+df['Signal'] = 0
+df['Stop Loss'] = np.nan
+df['Take Profit'] = np.nan
+df['Position'] = np.nan  # Position in trade
+
+# List to store trade outcomes
+buy_sell_pairs = []
+
+# Function to manage trades with stop loss and take profit
+trailing_stop_distance = 0.02  # Set trailing stop to 2% (customisable)
+highest_price = None  # Track the highest price reached during trade
+
+for idx, row in df.iterrows():
+    if row['Signal'] == 0 and row['RSI'] < 30 and buy_price is None:  # Entry signal: RSI < 30
+        buy_price = row['close']
+        buy_time = row['timestamp']
+        highest_price = buy_price
+
+        # Define stop loss and take profit based on volatility
+        stop_loss = buy_price * (1 - n * std)
+        take_profit = buy_price * (1 + m * std)
+
+        # Store the trade signal and limits
+        df.loc[idx, 'Signal'] = 1  # Buy signal
+        df.loc[idx, 'Stop Loss'] = stop_loss
+        df.loc[idx, 'Take Profit'] = take_profit
+    elif buy_price is not None:
+        if row['close'] > highest_price:
+            highest_price = row['close']
+            stop_loss = highest_price * (1 - trailing_stop_distance)  # Adjust trailing stop
+
+        # Exit conditions
+        if (row['close'] <= stop_loss) or (row['close'] >= df.loc[idx, 'Take Profit']) or (row['RSI'] > 70):
+            sell_price = row['close']
+            sell_time = row['timestamp']
+            buy_sell_pairs.append((buy_time, buy_price, sell_time, sell_price))
+
+            # Reset trade values
+            df.loc[idx, 'Signal'] = -1
+            df.loc[idx, 'Stop Loss'] = np.nan
+            df.loc[idx, 'Take Profit'] = np.nan
+            buy_price = None
+            highest_price = None
+
+# Trade statistics
+num_trades = len(buy_sell_pairs)
+
+# Win/loss statistics
+wins = 0
+losses = 0
+win_losses = []
+for buy_time, buy_price, sell_time, sell_price in buy_sell_pairs:
+    if sell_price > buy_price:
+        wins += 1
+        win_losses.append(sell_price - buy_price)
+    else:
+        losses += 1
+        win_losses.append(sell_price - buy_price)
+
+win_rate = wins / num_trades if num_trades > 0 else 0
+
+# Average gain/loss
+avg_win = np.mean([x for x in win_losses if x > 0]) if wins > 0 else 0
+avg_loss = np.mean([x for x in win_losses if x < 0]) if losses > 0 else 0
+
+# Risk/reward ratio
+risk_reward_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else np.nan
+
+# Display results
+print(f"Number of trades made: {num_trades}")
+print(f"Win Rate: {win_rate * 100:.2f}%")
+print(f"Average Win: {avg_win:.2f}")
+print(f"Average Loss: {avg_loss:.2f}")
+print(f"Risk/Reward Ratio: {risk_reward_ratio:.2f}")
+
+# Simulating capital performance
+initial_capital = 1000
+capital_rsi = initial_capital
+capital_bh = initial_capital
+
+# Buy and Hold strategy (entry at start, exit at end)
+buy_and_hold_initial_price = df['close'].iloc[0]
+buy_and_hold_final_price = df['close'].iloc[-1]
+capital_bh = initial_capital * (buy_and_hold_final_price / buy_and_hold_initial_price)
+
+# RSI strategy capital
+capital_rsi_history = [capital_rsi]
+for buy_time, buy_price, sell_time, sell_price in buy_sell_pairs:
+    trade_return = (sell_price - buy_price) / buy_price
+    capital_rsi *= (1 + trade_return)
+    capital_rsi_history.append(capital_rsi)
+
+# Create capital timeline
+capital_rsi_full = np.full(len(df), initial_capital)
+current_capital = initial_capital
+
+# Set index for update
+df.set_index('timestamp', inplace=True)
+
+# Update capital at each sell point
+for buy_time, buy_price, sell_time, sell_price in buy_sell_pairs:
+    trade_return = (sell_price - buy_price) / buy_price
+    current_capital *= (1 + trade_return)
+    mask = df.index >= sell_time
+    capital_rsi_full[mask] = current_capital
+
+# Reset index for plotting
+df.reset_index(inplace=True)
+
+# Calculate returns
+df['Market Return'] = df['close'].pct_change()
+df['Strategy Return'] = 0
+for idx in range(1, len(df)):
+    if df.loc[idx, 'Signal'] == -1:
+        df.loc[idx, 'Strategy Return'] = (df.loc[idx, 'close'] - df.loc[idx-1, 'close']) / df.loc[idx-1, 'close']
+
+# Cumulative returns
+df['Cumulative Market Return'] = (1 + df['Market Return']).cumprod() - 1
+df['Cumulative Strategy Return'] = (1 + df['Strategy Return']).cumprod() - 1
+
+# Final capital output
+print(f"Final capital with RSI strategy (starting from $1000): {capital_rsi:.2f} $")
+print(f"Final capital with Buy and Hold strategy (starting from $1000): {capital_bh:.2f} $")
+
+# Chart: cumulative returns and capital
+plt.figure(figsize=(14, 7))
+
+# First plot: cumulative returns
+plt.subplot(2, 1, 1)
+capital_timestamps = [df['timestamp'].iloc[0]] + [sell_time for _, _, sell_time, _ in buy_sell_pairs]
+rsi_cum_return = [cap / initial_capital - 1 for cap in capital_rsi_history]
+market_cum_return = (df['close'] / df['close'].iloc[0]) - 1
+
+plt.plot(df['timestamp'], market_cum_return, label='Market Return')
+plt.plot(capital_timestamps, rsi_cum_return, label='Strategy Return')
+plt.title(f'RSI Strategy vs Market - KO')
+plt.xlabel("Date")
+plt.ylabel("Cumulative Return (%)")
+plt.xticks(rotation=45)
+plt.legend()
+plt.grid(True)
+
+# Second plot: capital performance
+plt.subplot(2, 1, 2)
+capital_bh_history = initial_capital * (df['close'] / df['close'].iloc[0])
+
+plt.plot(df['timestamp'], capital_rsi_full, label='RSI Capital', color='blue')
+plt.plot(df['timestamp'], capital_bh_history, 'r--', label='Buy and Hold Capital', color='red')
+plt.title('Capital Over Time - RSI Strategy vs Buy and Hold')
+plt.xlabel('Date')
+plt.ylabel('Capital ($)')
+plt.legend()
+plt.grid(True)
+
+# Display chart
+plt.tight_layout()
+plt.show()
